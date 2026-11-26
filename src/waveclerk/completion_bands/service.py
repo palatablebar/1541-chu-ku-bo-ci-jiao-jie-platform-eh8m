@@ -3,6 +3,16 @@ from statistics import mean
 
 from .contracts import Verification, Assessment, ModelReport
 from .slices import replay_slices
+from ..handoff_duration.zone_choice import (
+    BANDS,
+    MIN_PAIRED_ORDERS,
+    REGRESSION,
+    ZoneChoice,
+    ZonePolicy,
+    build_zone_policy,
+    decide_zone,
+    late_load_missed,
+)
 
 
 def physical_residual_scale(point):
@@ -88,3 +98,18 @@ def boundary_diagnostics(checks, threshold):
             missed += review.estimate<threshold<=measured
             high += measured<threshold<=review.estimate
     return {'临界判断':'晚装车', '实绩超线':above, '估计超线':seen, '额外复测':high, '漏查':missed}
+
+
+def zone_estimator_report(training, checked_replay, live_zones=(), *, minimum=MIN_PAIRED_ORDERS):
+    """Paired replay decision for the estimator used by each work zone."""
+    policy = build_zone_policy(training, checked_replay, live_zones, minimum=minimum)
+    return policy.evidence()
+
+
+def select_zone_policy(training, checked_replay, live_zones=(), *, minimum=MIN_PAIRED_ORDERS):
+    return build_zone_policy(training, checked_replay, live_zones, minimum=minimum)
+
+
+compare_zone_estimators = zone_estimator_report
+evaluate_zone_estimators = zone_estimator_report
+choose_zone_policy = select_zone_policy

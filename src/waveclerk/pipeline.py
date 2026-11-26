@@ -6,6 +6,7 @@ from .pick_manifests import service as intake_service
 from .shift_vintage import service as cohort_service
 from .aisle_load import service as feature_service
 from .handoff_duration import service as model_service
+from .handoff_duration import zone_choice
 from .completion_bands import service as calibration_service
 from .order_mix import service as monitor_service
 from .aisle_dispatch import service as dispatch_service
@@ -50,21 +51,39 @@ def stage_at(index, details, records, issues=()):
     return {'key': code, 'title': title, 'summary': details, 'records': list(records), 'errors': list(issues)}
 
 
-def rows_for(plan, scored, vectors):
+def rows_for(plan, scored, vectors, estimator_policy=None):
     by_key = {item.key: item for item in scored}
     factor_names = ('人均拣货行', '路径工作量', '大件行数', '合箱密度', '交接节奏')
     order = []
     for job in plan.jobs:
         point = by_key[job.key]
+        if estimator_policy is None:
+            estimator_method = zone_choice.REGRESSION
+            estimator_name = zone_choice.REGRESSION_OPTION
+            estimator_choice = zone_choice.REGRESSION
+        else:
+            zone_decision = estimator_policy.get(job.cohort)
+            estimator_method = zone_decision.method
+            estimator_name = zone_decision.selected_option
+            estimator_choice = zone_decision.choice
         if len(point.contributions) == len(factor_names):
             reasons = sorted(zip(factor_names, point.contributions, strict=True), key=lambda val: (-abs(val[1]), val[0]))
             driver = ' · '.join(f'{key} {amount:+.2f}' for key, amount in reasons[:2])
         else:
             driver = ' · '.join(f'{amount:+.2f}' for amount in point.contributions)
         interval = ('–' if job.lower is None else f'{job.lower:.2f}–{job.upper:.2f}')
+        if estimator_policy is None:
+            band_estimate = None
+        else:
+            band_estimate = zone_choice.pickup_estimate(estimator_policy.reference, point)
         order.append({'key': job.key, 'zone': job.cohort, 'estimate': job.estimate, 'interval': interval,
+                      'raw_estimate': point.score, 'regression_estimate': point.score,
+                      'band_estimate': band_estimate, 'baseline_estimate': band_estimate,
                       'state': job.state, 'cost': job.cost, 'reason': job.reason, 'evidence': job.summary,
                       'drivers': driver, 'missing': len(point.missing), 'hits': list(job.rule_hits),
+                      'estimator': estimator_method, 'estimator_name': estimator_name,
+                      'choice': estimator_choice, 'selected_method': estimator_choice,
+                      '选用估时': estimator_name, '估时套别': estimator_method,
                       'measurements': dict(zip(('lines', 'bulk_share', 'pickers', 'walk_m', 'merge_orders', 'slack_min'), point.input_values, strict=True)),
                       'unmeasured': list(point.missing), 'operations': feature_service.business_factors(vectors[job.key])})
     return order
@@ -88,7 +107,8 @@ def worksheet(documents, as_of):
         raise ValueError('需要有效的单据列表，最多 2500 行')
     base = intake_service.load_samples(documents,as_of)
     rule = window_contract.WindowRule.standard(allow_censor=False)
-    release = cohort_service.build_windows(base.entries,replace(rule,as_of=as_of))
+    active_rule = replace(rule,as_of=as_of)
+    release = cohort_service.build_vintage_windows(documents, base.entries, active_rule)
     cohort_service.model_inputs(release)
     stat = feature_service.fit_features(release.train)
     return base,release,stat
@@ -114,7 +134,10 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
     previous=monitor_service.fit_baseline(features.train,state.fingerprint)
     drift=monitor_service.scan_current(previous,features.live,state.fingerprint)
     coverage=monitor_service.coverage_by_group(features.calibration,features.live)
-    allocation=dispatch_service.plan_jobs(checked_live,drift.domain,capacity,mode)
+    live_zones = tuple(sorted({item.raw.cohort for item in checked_live}))
+    estimator_policy = zone_choice.build_zone_policy(features.train, evaluated, live_zones)
+    selected_live = estimator_policy.apply(checked_live)
+    allocation=dispatch_service.plan_jobs(selected_live,drift.domain,capacity,mode)
     closed=audit_service.close_batch(documents,intake,windows,allocation,state.fingerprint,kernel.name,mode)
     performance=calibration_service.performance(evaluated)
     states = dict(closed.totals.states)
@@ -126,7 +149,7 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
         {'label': '额度结余', 'value': allocation.balance},
     ]
     vectors = {item.key: item for item in features.live}
-    row_list = rows_for(allocation, scored, vectors)
+    row_list = rows_for(allocation, scored, vectors, estimator_policy)
     operating_rows = dispatch_service.operating_ledger(row_list)
     overtime = calibration_service.boundary_diagnostics(evaluated, 34)
     sector = calibration_service.sector_replay(evaluated, 34)
@@ -135,16 +158,36 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
     features_glance = feature_service.feature_evidence(state) + feature_service.measure_review(features)
     weight_rows = [{'量测': key, '取值': value} for key, value in kernel.evidence]
     ignored = [issue.evidence() for issue in intake.issues]
+    estimator_rows = estimator_policy.evidence()
+    estimator_labels = estimator_policy.labels()
+    estimator_methods = estimator_policy.mapping()
+    estimator_enabled = {zone: estimator_policy.use_regression(zone) for zone in estimator_labels}
+    vintage_rows = cohort_service.vintage_revision_evidence(windows, intake.entries)
     details = [
         stage_at(0, f'接收 {intake.source_rows} 条，采用 {len(intake.entries)} 条', intake_service.preliminary_evidence(intake), ignored),
-        stage_at(1, f'拟合 {len(windows.train)} 条，校准 {len(windows.calibration)} 条，回放 {len(windows.replay)} 条', cohort_service.window_evidence(windows) + cohort_service.readiness_evidence(windows, as_of)),
+        stage_at(1, f'拟合 {len(windows.train)} 条，校准 {len(windows.calibration)} 条，回放 {len(windows.replay)} 条', cohort_service.window_evidence(windows) + vintage_rows + cohort_service.readiness_evidence(windows, as_of)),
         stage_at(2, '特征转换版本 ' + state.fingerprint, features_glance),
         stage_at(3, kernel.name, weight_rows + model_service.inspection_rows(kernel, features) + comparison_rows(scored)),
-        stage_at(4, f'{fitted_calibration.method} · {performance.status} · {performance.count} 条回放实绩', calibration_service.calibration_evidence(performance) + [overtime] + sector),
+        stage_at(4, f'{fitted_calibration.method} · {performance.status} · {performance.count} 条回放实绩', estimator_rows + calibration_service.calibration_evidence(performance) + [overtime] + sector),
         stage_at(5, f'{drift.status} · {len(drift.domain)} 张单据需外推判读', monitor_service.shift_evidence(drift, coverage) + operating_shift),
-        stage_at(6, f'本班占用 {allocation.capacity-allocation.balance} / {allocation.capacity} 个工位单位', dispatch_service.action_evidence(allocation) + dispatch_service.operating_group(checked_live, allocation)),
+        stage_at(6, f'本班占用 {allocation.capacity-allocation.balance} / {allocation.capacity} 个工位单位', estimator_rows + dispatch_service.action_evidence(allocation) + dispatch_service.operating_group(selected_live, allocation)),
         stage_at(7, f'处置凭证 {closed.stamp} · 额度守恒', audit_service.reconciliation_evidence(closed) + field_evidence['执行业务单']),
     ]
+    details[1]['vintage_revisions'] = vintage_rows
+    for stage_index in (4, 6):
+        details[stage_index]['estimator_choices'] = estimator_rows
+        details[stage_index]['zone_estimators'] = estimator_policy.mapping()
+        details[stage_index]['zone_models'] = estimator_policy.labels()
+        details[stage_index]['zone_choices'] = estimator_rows
+        details[stage_index]['zone_decisions'] = estimator_rows
+        details[stage_index]['zone_selection'] = estimator_rows
+        details[stage_index]['estimator_policy'] = {
+            'minimum_paired_orders': zone_choice.MIN_PAIRED_ORDERS,
+            'zones': estimator_rows,
+            'by_zone': {row['作业区']: row for row in estimator_rows},
+            'methods': estimator_methods,
+            'labels': estimator_labels,
+        }
     details[6]['operating_rows'] = operating_rows
     details[6]['operating_title'] = '装车交接账'
     points = [{'label': row['key'], 'value': row['estimate'], 'state': row['state'], 'zone': row['zone'],
@@ -163,6 +206,27 @@ def execute(documents, capacity=12, mode='balanced', *, as_of=96):
     overview_report = {'capacity' : capacity, 'mode': mode, 'as_of': as_of, 'sample_hash': closed.batch_hash,
               'policy_hash': closed.policy_hash, 'feature_stamp': state.fingerprint,
               'model': kernel.name, 'run_id': closed.stamp, 'object_name': DISPLAY['object_name'],
+              'zone_estimators': estimator_methods,
+              'zone_estimator_labels': estimator_labels,
+              'zone_use_regression': estimator_enabled,
+              'regression_zones': tuple(sorted(z for z, enabled in estimator_enabled.items() if enabled)),
+              'band_zones': tuple(sorted(z for z, enabled in estimator_enabled.items() if not enabled)),
+              'zone_models': estimator_labels,
+              'zone_decisions': estimator_rows,
+              'zone_choices': estimator_rows,
+              'zone_selection': estimator_rows,
+              'zone_policy': estimator_rows,
+              'estimators': estimator_policy.labels(),
+              'estimator_map': estimator_policy.mapping(),
+              'estimator_kinds': {row['作业区']: row['choice'] for row in estimator_rows},
+              'selected_estimators': estimator_policy.mapping(),
+              'estimator_choices': estimator_rows,
+              'estimator_policy': {'minimum_paired_orders': zone_choice.MIN_PAIRED_ORDERS,
+                                   'zones': estimator_rows,
+                                   'choices': estimator_rows,
+                                   'by_zone': {row['作业区']: row for row in estimator_rows},
+                                   'methods': estimator_methods,
+                                   'labels': estimator_labels},
               'unit': DISPLAY['unit'], 'sections': details, 'flow_counts': list(states.items()),
               'measures': {'lines': ('订单行数', '行'),
  'bulk_share': ('大件订单', '%'),

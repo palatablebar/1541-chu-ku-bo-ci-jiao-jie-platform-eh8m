@@ -11,6 +11,8 @@
 
 导入 JSON 对象时 `records` 为 1–2500 条单据，`as_of` 为整数工日；默认第 96 日。额度接受 1–60，策略接受 `balanced` 或 `focus`。入站异常保留于第一环节。整批缺少成熟窗口时响应 422 并给出原因。
 
+`completion_bands`（回放误差）和 `aisle_dispatch`（通道分派）环节均提供每区估时选择表，字段 `选用估时` 为 `回归估时` 或 `分档估时`；单据列表也有 `estimator_name` 列。历史窗口按各自终点选择可用版次，迟到改单不会回溯替换旧版。
+
 ```sh
 docker compose exec -T app python -m waveclerk.entry evaluate --input sample_data/pick_manifests_sample.json --capacity 9
 ```

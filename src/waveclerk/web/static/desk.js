@@ -5,8 +5,8 @@ const code = document.body.dataset.endpoint;
 const endpoint = `/api/${code}`;
 const nav = [...document.querySelectorAll('[data-stage]')];
 let currentBatch = null;
-const order = {key:'单号',zone:'作业区',estimate:'估计',interval:'估计区间',state:'处置',cost:'用量',reason:'原因码',evidence:'处理依据',drivers:'主要影响项',missing:'缺测量',hits:'命中规则'};
-const visibleOrder = ['key','zone','estimate','state','cost'];
+const order = {key:'单号',zone:'作业区',estimator_name:'估时套别',estimate:'估计',interval:'估计区间',state:'处置',cost:'用量',reason:'原因码',evidence:'处理依据',drivers:'主要影响项',missing:'缺测量',hits:'命中规则'};
+const visibleOrder = ['key','zone','estimator_name','estimate','state','cost'];
 let ledger;
 let focus = 6;
 let currentItem;
@@ -151,7 +151,8 @@ function showQueue() {
     const sought = byId('filter').value.trim().toLocaleLowerCase('zh-CN');
     const state = byId('status-filter').value;
     const rows = ledger.rows.filter(item => (!state || item.state === state) &&
-          (!sought || [item.key,item.zone,item.reason,item.evidence].some(text => text.toLocaleLowerCase('zh-CN').includes(sought))));
+          (!sought || [item.key,item.zone,item.reason,item.evidence,item.estimator_name,item.estimator]
+              .some(text => String(text ?? '').toLocaleLowerCase('zh-CN').includes(sought))));
     byId('row-count').textContent = `${rows.length}/${ledger.rows.length} 条`;
     byId('work-rows').replaceChildren(rows.length ? rowsTable(rows,visibleOrder,{labels:order,choose:inspect}) : node('p','当前条件下没有匹配单据','empty'));
 }

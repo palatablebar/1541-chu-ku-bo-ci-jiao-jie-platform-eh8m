@@ -4,6 +4,7 @@ from math import exp, isfinite
 
 from .contracts import RuleNotice, Job, Plan, Policy, RISK_CUTOFF
 from .constraints import WorkOrder, apply_aisle_dispatch
+from ..handoff_duration.zone_choice import BANDS, REGRESSION, ZonePolicy
 
 
 def measures(raw):
@@ -115,6 +116,18 @@ def allocate(assessments, attention, policy):
 
 def plan_jobs(assessments, attention, capacity, mode='balanced'):
     return allocate(assessments, frozenset(attention), Policy.select(capacity, mode))
+
+
+def apply_zone_policy(assessments, policy):
+    """Rewrite point estimates with each zone's replay-selected estimator."""
+    if not isinstance(policy, ZonePolicy):
+        raise TypeError('需要各区估时选择策略')
+    return policy.apply(assessments)
+
+
+# Descriptive aliases for callers naming this step as estimator routing.
+apply_selected_estimates = apply_zone_policy
+route_by_zone_estimator = apply_zone_policy
 
 
 def action_evidence(plan):
